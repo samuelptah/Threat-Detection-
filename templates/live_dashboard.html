@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <title>Live AI Threat Intelligence Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.socket.io/4.4.1/socket.io.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.1.1/css/all.min.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"></script>
+  <style>
+    /* Custom Scrollbar */
+    #log::-webkit-scrollbar, #modal-packet-hex::-webkit-scrollbar { width: 8px; }
+    #log::-webkit-scrollbar-track, #modal-packet-hex::-webkit-scrollbar-track { background: #1f2937; }
+    #log::-webkit-scrollbar-thumb, #modal-packet-hex::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+    
+    /* Layout Helpers */
+    .chart-container, #map { position: relative; height: 100%; width: 100%; }
+    #packet-modal.hidden { display: none; }
+    
+    /* Toast Alert System */
+    #alert-container { position: fixed; bottom: 1rem; right: 1rem; z-index: 50; display: flex; flex-direction: column; gap: 0.5rem; }
+    .toast { display: flex; align-items: center; padding: 0.75rem 1rem; border-radius: 0.5rem; color: white; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -2px rgba(0,0,0,0.05); transform: translateX(120%); animation: slideIn 0.5s forwards; }
+    .toast.fade-out { animation: slideOut 0.5s forwards; }
+    .toast-info { background-color: #3b82f6; } .toast-warning { background-color: #f59e0b; } .toast-error { background-color: #ef4444; }
+    @keyframes slideIn { from { transform: translateX(120%); } to { transform: translateX(0); } }
+    @keyframes slideOut { from { transform: translateX(0); } to { transform: translateX(120%); } }
+
+    /* Pulsing Home Marker Animation */
+    @keyframes pulse-blue { 0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); } 70% { box-shadow: 0 0 0 15px rgba(59, 130, 246, 0); } 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); } }
+    .pulse-marker-blue-outer { border-radius: 50%; animation: pulse-blue 2.5s infinite; padding: 5px; }
+  </style>
+</head>
+<body class="bg-gray-900 text-white min-h-screen transition-colors duration-300">
+
+  <header class="flex justify-between items-center px-6 py-4 border-b border-gray-700 bg-gray-800 sticky top-0 z-20">
+    <h1 class="text-2xl font-bold flex items-center gap-3"><i class="fa-solid fa-shield-virus text-blue-400"></i> AI Threat Intelligence</h1>
+    <div class="flex items-center gap-4">
+      <button id="test-threat-btn" class="bg-purple-600 hover:bg-purple-500 px-3 py-1 rounded text-sm transition-colors" title="Simulate a new threat to test the UI">
+        <i class="fa-solid fa-vial mr-2"></i>Test Threat
+      </button>
+      <select id="filter" class="bg-gray-700 text-white rounded px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <option value="All">All Threats</option>
+        <option value="PortScan">PortScan</option>
+        <option value="DoS">DoS</option>
+        <option value="BruteForce">BruteForce</option>
+      </select>
+      <select id="interfaceSelect" class="bg-gray-700 text-white rounded px-3 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+        <option>Loading...</option>
+      </select>
+      <button id="sniffToggle" class="bg-red-600 hover:bg-red-500 w-40 px-3 py-1 rounded text-sm transition-colors">
+        <i class="fa-solid fa-pause mr-2"></i>Pause Sniffing
+      </button>
+      <button id="muteToggle" class="bg-green-600 hover:bg-green-500 w-10 px-3 py-1 rounded text-sm transition-colors" title="Mute/Unmute Alerts"><i id="muteIcon" class="fa-solid fa-volume-high"></i></button>
+      <button id="toggleTheme" class="bg-gray-600 hover:bg-gray-500 px-3 py-1 rounded text-sm transition-colors"><i class="fa-solid fa-moon"></i></button>
+    </div>
+  </header>
+
+  <main class="p-6">
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
+        <div class="bg-gray-800 p-4 rounded-lg shadow-lg">
+          <h3 class="font-semibold text-gray-400 text-sm">System Status</h3>
+          <p>Status: <span id="sniffingStatus" class="font-bold text-green-400">Active</span></p>
+          <p>Interface: <span id="currentInterface" class="font-bold text-yellow-300">...</span></p>
+          <p>Connection: <span id="statusBadge" class="inline-block px-2 py-1 rounded text-xs bg-yellow-600">...</span></p>
+          <p>Risk Level: <span id="riskLevel" class="font-bold text-green-400">SAFE</span></p>
+          <p>Last Update: <span id="lastUpdate" class="font-bold text-gray-400">N/A</span></p>
+        </div>
+        <div class="bg-gray-800 p-4 rounded-lg shadow-lg">
+            <h3 class="font-semibold text-gray-400 text-sm">Packet Analysis</h3>
+            <p>Analyzed: <span id="totalCount" class="font-bold text-blue-400 text-2xl">0</span></p>
+            <p>Threats: <span id="detectedThreats" class="font-bold text-red-400 text-2xl">0</span></p>
+        </div>
+        <div class="bg-gray-800 p-4 rounded-lg shadow-lg">
+            <h3 class="font-semibold text-gray-400 text-sm">Last Threat Details</h3>
+            <p>Type: <span id="lastPrediction" class="font-bold">N/A</span></p>
+            <p>Severity: <span id="lastSeverity" class="font-bold">N/A</span></p>
+            <p>Confidence: <span id="lastConfidence" class="font-bold">N/A</span></p>
+            <p>Source: <span id="lastSrcIP" class="font-bold font-mono">N/A</span></p>
+            <p>Destination: <span id="lastDstIP" class="font-bold font-mono">N/A</span></p>
+            <p>Timestamp: <span id="lastTimestamp" class="font-bold">N/A</span></p>
+        </div>
+        <div class="bg-gray-800 p-4 rounded-lg shadow-lg">
+          <h3 class="font-semibold text-gray-400 text-sm mb-2">Top Attackers (by IP)</h3>
+          <div id="topAttackers" class="text-sm font-mono space-y-1">
+            <p class="text-gray-500">Awaiting data...</p>
+          </div>
+        </div>
+    </div>
+    
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div class="bg-gray-800 p-4 rounded-lg shadow-lg">
+            <h2 class="text-xl font-semibold mb-2">Threat Type Distribution</h2>
+            <div class="chart-container h-72"><canvas id="threatChart"></canvas></div>
+        </div>
+        <div class="bg-gray-800 p-4 rounded-lg shadow-lg">
+            <h2 class="text-xl font-semibold mb-2">Threats Per Second</h2>
+            <div class="chart-container h-72"><canvas id="rateChart"></canvas></div>
+        </div>
+    </div>
+
+    <div class="mt-6 bg-gray-800 p-4 rounded-lg shadow-lg">
+        <h2 class="text-xl font-semibold mb-2">GeoIP Threat Map</h2>
+        <div id="map" class="h-96 rounded shadow-inner bg-gray-700"></div>
+    </div>
+
+    <div class="mt-6 bg-gray-800 p-4 rounded-lg shadow-lg">
+      <h2 class="text-xl font-semibold mb-2">Live Threat Events</h2>
+      <div id="logHeader" class="flex text-xs text-gray-400 font-bold p-2 border-b border-gray-700">
+        <span class="w-[15%]">TYPE</span>
+        <span class="w-[15%]">SEVERITY</span>
+        <span class="w-[30%]">SOURCE → DESTINATION</span>
+        <span class="w-[15%] text-right">TIMESTAMP</span>
+        <span class="w-[25%] text-center">ACTIONS</span>
+      </div>
+      <div id="log" class="h-96 overflow-y-auto text-sm font-mono"></div>
+    </div>
+   <div class="mt-6 bg-gray-800 p-4 rounded-lg shadow-lg"> ... </div> 
+  </main>
+  <div id="alert-container"></div>
+  <div id="packet-modal" class="hidden"> ... </div>
+
+  <footer class="text-center text-gray-500 text-xs p-4 border-t border-gray-700 mt-6">
+    <p>AI-Powered Network Intrusion Detection System</p>
+  </footer>
+
+  <div id="packet-modal" class="hidden fixed inset-0 bg-black bg-opacity-70 z-30 flex items-center justify-center p-4">
+    <div class="bg-gray-800 rounded-lg shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col">
+        <header class="flex justify-between items-center p-4 border-b border-gray-700">
+            <h2 id="modal-title" class="text-2xl font-bold">Packet Details</h2>
+            <button id="modal-close-btn" class="text-gray-400 hover:text-white">×</button>
+        </header>
+        <main class="p-4 overflow-y-auto">
+            <h3 class="text-lg font-semibold text-blue-400 mb-2">Packet Summary</h3>
+            <p id="modal-packet-summary" class="font-mono bg-black p-2 rounded"></p>
+            <h3 class="text-lg font-semibold text-blue-400 mt-4 mb-2">Packet Layers</h3>
+            <p id="modal-packet-layers" class="font-mono bg-black p-2 rounded"></p>
+            <h3 class="text-lg font-semibold text-blue-400 mt-4 mb-2">Hex Dump</h3>
+            <pre id="modal-packet-hex" class="font-mono bg-black p-2 rounded text-xs h-64 overflow-y-auto"></pre>
+        </main>
+    </div>
+  </div>
+
+  <script>
+    // --- PART 1: INITIALIZATION & STATE ---
+    const socket = io();
+    const threatDataCache = {};
+    const DOM = {
+        logContainer: document.getElementById('log'), totalCount: document.getElementById('totalCount'),
+        detectedThreats: document.getElementById('detectedThreats'), lastPrediction: document.getElementById('lastPrediction'),
+        lastSeverity: document.getElementById('lastSeverity'), lastSrcIP: document.getElementById('lastSrcIP'),
+        statusBadge: document.getElementById('statusBadge'), sniffToggle: document.getElementById("sniffToggle"),
+        interfaceSelect: document.getElementById("interfaceSelect"), currentInterface: document.getElementById('currentInterface'),
+        sniffingStatus: document.getElementById('sniffingStatus'), topAttackersDiv: document.getElementById('topAttackers'),
+        packetModal: document.getElementById('packet-modal'), toggleThemeBtn: document.getElementById('toggleTheme'),
+        filterSelect: document.getElementById('filter'), testThreatBtn: document.getElementById('test-threat-btn'),
+        modalCloseBtn: document.getElementById('modal-close-btn'), modalTitle: document.getElementById('modal-title'),
+        modalPacketSummary: document.getElementById('modal-packet-summary'), lastDstIP: document.getElementById('lastDstIP'),
+        alertContainer: document.getElementById('alert-container'), muteIcon: document.getElementById('muteIcon'),
+        lastConfidence: document.getElementById('lastConfidence'), lastTimestamp: document.getElementById('lastTimestamp'),
+        lastUpdate: document.getElementById('lastUpdate'), muteToggle: document.getElementById('muteToggle'),
+    };
+    
+    const state = {
+        threatCounts: { Benign: 0, DoS: 0, PortScan: 0, BruteForce: 0, Phishing: 0, Others: 0 },
+        topAttackers: {}, totalPredictions: 0, totalThreats: 0, sniffing: true, threatsThisSecond: 0,
+        mapLayer: null,
+        sniffing: true, mapLayer: null, homeLocation: null, isMuted: false,
+        currentRisk: { level: 'SAFE', timeoutId: null },
+        sounds: {
+            threat: new Audio('data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU2LjQwLjEwMQAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIwAAHwAAB1RWaWJtdGhlbGVuZyB0aGUgdG90YWwgZGxpbmd0aGUgdG9vbCBkbGVuZyB0aGUgdG90YWwgZGxpbmd0aGUgdG9vbAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAExbGF2YzU2LjYwAAAAAAAAAAAAAAAAJAAAAAABAAAFUYWIqgAIAABVRgADjnAACqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq-'),
+            error: new Audio('data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU2LjQwLjEwMQWZAAAAAAAAAAAA//tAwAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIwAAHwAAB1RWaWJtdGhlbGVuZyB0aGUgdG90YWwgZGxpbmd0aGUgdG9vbCBkbGVuZyB0aGUgdG90YWwgZGxpbmd0aGUgdG9vbAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAExbGF2YzU2LjYwAAAAAAAAAAAAAAAAgAAAQAABdeJjWRgAIAAAAAEAAwAAVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV-'),
+            connect: new Audio('data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU2LjQwLjEwMQaBAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIwAAHwAAB1RWaWJtdGhlbGVuZyB0aGUgdG90YWwgZGxpbmd0aGUgdG9vbCBkbGVuZyB0aGUgdG90YWwgZGxpbmd0aGUgdG9vbAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAExbGF2YzU2LjYwAAAAAAAAAAAAAAAAgAAAQAABdeJoWAAAAAIAAAAAEAAwAAVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV-')
+        }
+    };
+
+    // --- PART 2: CHART & MAP INITIALIZATION ---
+    const createGradient = (ctx, color) => {
+        const gradient = ctx.createLinearGradient(0, 0, 0, ctx.canvas.height);
+        gradient.addColorStop(0, `${color}80`); gradient.addColorStop(1, `${color}00`); return gradient;
+    };
+    const threatChart = new Chart(document.getElementById('threatChart').getContext('2d'), { type: 'doughnut', data: { labels: Object.keys(state.threatCounts), datasets: [{ data: Object.values(state.threatCounts), backgroundColor: ['#16a34a', '#dc2626', '#f59e0b', '#8b5cf6', '#3b82f6', '#4b5563'], borderColor: '#374151', borderWidth: 2 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { color: '#d1d5db' } } } } });
+    const rateChartCtx = document.getElementById("rateChart").getContext('2d');
+    const rateChart = new Chart(rateChartCtx, { type: 'line', data: { labels: [], datasets: [{ label: 'Threats/sec', data: [], borderColor: '#facc15', tension: 0.4, fill: true, backgroundColor: () => createGradient(rateChartCtx.canvas.getContext('2d'), '#facc15') }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, ticks: { color: '#9ca3af', stepSize: 1 } }, x: { ticks: { color: '#9ca3af' } } }, plugins: { legend: { display: false } } } });
+    
+    const map = L.map('map', { preferCanvas: true }).setView([20, 0], 2);
+    const mapTiles = {
+        dark: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+        light: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
+    };
+    const showAlert = (message, level = 'info', duration = 5000) => {
+        const toast = document.createElement('div');
+        toast.className = `toast toast-${level}`;
+        const icons = { info: 'fa-info-circle', warning: 'fa-triangle-exclamation', error: 'fa-circle-xmark' };
+        toast.innerHTML = `<i class="fa-solid ${icons[level]} mr-3"></i> <p>${message}</p>`;
+        DOM.alertContainer.appendChild(toast);
+        if (duration) {
+            setTimeout(() => {
+                toast.classList.add('fade-out');
+                toast.addEventListener('animationend', () => toast.remove());
+            }, duration);
+        }
+    };
+
+    const playSound = (error) => {
+        if (state.isMuted) return;
+        try {
+            state.sounds[error]?.play().catch(e => console.warn("Audio play blocked by browser."));
+        } catch (e) {
+            console.error("Error playing sound:", e);
+        }
+    };
+    const updateTopAttackers = () => {
+        const sortedAttackers = Object.entries(state.topAttackers).sort((a, b) => b[1] - a[1]).slice(0, 5);
+        DOM.topAttackersDiv.innerHTML = sortedAttackers.length ? sortedAttackers.map(([ip, count]) => `<p class="text-gray-300">${ip} <span class="text-yellow-400">(${count})</span></p>`).join('') : '<p class="text-gray-500">No data available</p>';
+    };
+    const getSeverityInfo = (type) => {
+        const severity = getSeverityLabel(type);
+        return { label: severity, color: getSeverityColor(severity) };
+    };
+    state.mapLayer = L.tileLayer(mapTiles.dark, { attribution: '© OpenStreetMap contributors © CARTO' }).addTo(map);
+    L.control.scale({ position: 'bottomright', maxWidth: 100, imperial: false }).addTo(map);
+    L.control.layers({ 'Dark': state.mapLayer }, {}, { collapsed: false, position: 'topright' }).addTo(map);
+    const threatIcon = L.icon({ iconUrl: 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iI0Y4NzE3MSI+PHBhdGggZD0iTTEyIDJMMCAyMWgyNGwtMTItMTl6bTEgMTZIOS44OEwxMiA2LjU2IDE0LjEyIDE4SDExdi0yaDJ2MnoiLz48L3N2Zz4=', iconSize: [25, 25] });
+    const homeIcon = L.icon({ iconUrl: 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iIzNhODJmYyI+PHBhdGggZD0iTTEyIDMuMmw3LjEgNGwxLjItMkwxMiAxIDEuOCA1LjIgMyA2LjRsNy00ek01IDEybDcgNSA3LTV2Nkg1di02em0tMiA4aDE4diJoM0gydi0yaDE4djJoLTN6Ii8+PC9zdmc+', iconSize: [35, 35]});
+
+
+
+
+    // --- PART 3: ACTION & HELPER FUNCTIONS ---
+    const getSeverityLabel = (type) => ({'DoS':'Critical', 'BruteForce':'High', 'Phishing':'High', 'PortScan':'Moderate', 'Benign':'Safe'}[type] || 'Low');
+    const getSeverityColor = (sev) => ({'Critical':'text-red-500','High':'text-orange-400','Moderate':'text-yellow-300','Low':'text-blue-300','Safe':'text-green-400'}[sev] || 'text-gray-300');
+    const labelColors = {DoS:"bg-red-600",PortScan:"bg-yellow-500",BruteForce:"bg-purple-500",Phishing:"bg-blue-500",Benign:"bg-green-700",Others:"bg-gray-600"};
+    
+    const addHomeMarker = () => {
+        fetch('https://ipapi.co/json/')
+            .then(res => res.json())
+            .then(loc => {
+                
+                if(loc && loc.latitude && loc.longitude) {
+                    L.marker([loc.latitude, loc.longitude], { icon: homeIcon }).addTo(map).bindPopup(`<b>Your Location (Home Base)</b><br>${loc.city}, ${loc.country_name}`);
+                    map.setView([loc.latitude, loc.longitude], 5);
+                    state.homeLocation = { lat: loc.latitude, lon: loc.longitude };
+                    playSound('connect');
+                    showAlert(`Home location set to ${loc.city}, ${loc.country_name}`, 'info');
+
+                } else {
+                    console.warn("Could not determine home location from IP. Map will remain centered globally.");
+                }
+            }).catch(err => console.error("Could not fetch home location:", err));
+    };
+    
+    const toggleSniffing = () => {
+        state.sniffing = !state.sniffing;
+        DOM.sniffToggle.textContent = state.sniffing ? 'Stop Sniffing' : 'Start Sniffing';
+        DOM.sniffingStatus.textContent = state.sniffing ? 'Active' : 'Inactive';
+        DOM.statusBadge.className = `inline-block px-2 py-1 rounded text-xs ${state.sniffing ? 'bg-green-600' : 'bg-red-600'}`;
+        socket.emit('toggle_sniffing', state.sniffing);
+    };
+
+    const updateInterface = (interfaceName) => {
+        DOM.currentInterface.textContent = interfaceName || 'N/A';
+        socket.emit('update_interface', interfaceName);
+    };
+
+    const updateRiskLevel = (newSeverity) => {
+        const severityOrder = { 'Safe': 0, 'Low': 1, 'Moderate': 2, 'High': 3, 'Critical': 4 };
+        if (severityOrder[newSeverity] >= severityOrder[state.currentRisk.level]) {
+            state.currentRisk.level = newSeverity;
+            const { color } = getSeverityInfo(newSeverity);
+            DOM.riskLevel.textContent = newSeverity.toUpperCase();
+            DOM.riskLevel.className = `font-bold ${color}`;
+        }
+        clearTimeout(state.currentRisk.timeoutId);
+        state.currentRisk.timeoutId = setTimeout(() => {
+            state.currentRisk.level = 'Safe';
+            DOM.riskLevel.textContent = 'SAFE';
+            DOM.riskLevel.className = 'font-bold text-green-400';
+        }, 30000);
+    };
+
+    const updateMapTheme = () => {
+        if (state.mapLayer) map.removeLayer(state.mapLayer);
+        const theme = document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+        state.mapLayer = L.tileLayer(mapTiles[theme], { attribution: '© OpenStreetMap contributors © CARTO' }).addTo(map);
+    };
+    const addHomeBase = () => {
+        if (state.homeLocation) return;
+        fetch('https://ipapi.co/json/').then(res => res.json()).then(loc => {
+            if (loc && loc.latitude) {
+                state.homeLocation = { lat: loc.latitude, lng: loc.longitude };
+                const homeDivIcon = L.divIcon({
+                    className: 'pulse-marker-blue-outer',
+                    html: `<img src="https://flagcdn.com/32x24/${loc.country_code.toLowerCase()}.png" class="border-2 border-blue-400 rounded-md">`,
+                    iconSize: [32, 24], iconAnchor: [16, 12]
+                });
+                L.marker([loc.latitude, loc.longitude], { icon: homeDivIcon, zIndexOffset: 1000 }).addTo(map).bindPopup(`<b>Your Location</b><br>${loc.ip}`);
+                map.setView([loc.latitude, loc.longitude], 4);
+            }
+        });
+    };
+
+    const openPacketModal = (threatId) => {
+        const data = threatDataCache[threatId];
+        if (!data || !data.packet_info) return;
+        document.getElementById('modal-title').textContent = `Packet Details for ${data.label} from ${data.src_ip}`;
+        document.getElementById('modal-packet-summary').textContent = data.packet_info.summary;
+        document.getElementById('modal-packet-layers').textContent = data.packet_info.layers;
+        document.getElementById('modal-packet-hex').textContent = data.packet_info.hex_dump;
+        DOM.packetModal.classList.remove('hidden');
+    };
+    
+    const processNewThreat = (data) => {
+        data.packet_info = data.packet_info || { summary: "Detailed packet info not provided.", layers: "N/A", hex_dump: "N/A" };
+        const type = data.label || 'Others';
+        const time = data.timestamp || new Date().toLocaleTimeString();
+        const src_ip = data.src_ip || 'N/A';
+        const dst_ip = data.dst_ip || 'N/A';
+        const severity = getSeverityLabel(type);
+        const threatId = `threat-${Date.now()}-${Math.random()}`;
+        const riskInfo = getSeverityInfo(type);
+        const riskColor = riskInfo.color;
+        const confidenceValue = parseFloat(data.confidence) || 0;
+        const confidence = `${confidenceValue.toFixed(1)}%`;
+        threatDataCache[threatId] = data;
+
+        state.totalPredictions++;
+        state.threatCounts[type]++;
+        if (type !== 'Benign') {
+            state.totalThreats++;
+            state.threatsThisSecond++;
+            state.topAttackers[src_ip] = (state.topAttackers[src_ip] || 0) + 1;
+            switch (riskInfo.level) {
+                case 'high':
+                    alert(`High risk detected from ${src_ip}`);
+                    break;
+                case 'medium':
+                    alert(`Medium risk detected from ${src_ip}`);
+                    break;
+                case 'low':
+                    alert(`Low risk detected from ${src_ip}`);
+                    break;
+            }
+        }
+
+        DOM.totalCount.textContent = state.totalPredictions;
+        DOM.detectedThreats.textContent = state.totalThreats;
+        DOM.lastPrediction.innerHTML = `<span class="inline-block px-2 py-1 rounded text-xs text-white ${labelColors[type] || 'bg-gray-600'}">${type}</span>`;
+        DOM.lastSeverity.className = `font-bold ${getSeverityColor(severity)}`;
+        DOM.lastSeverity.textContent = severity;
+        DOM.lastSrcIP.textContent = src_ip;
+        DOM.lastDstIP.textContent = dst_ip;
+        DOM.lastConfidence.textContent = confidence;
+        if (data.confidence >= 0.8) {
+            updateRiskLevel(severity);
+            playSound('threat');
+        } else {
+            updateRiskLevel('Safe');
+        }
+        if (state.threatsThisSecond >= 5) {
+            showAlert(`High threat activity detected! ${state.threatsThisSecond} threats in the last second.`, 'warning', 5000);
+            playSound('error');
+        }
+        DOM.lastTimestamp.textContent = time;
+        DOM.lastUpdate.textContent = new Date().toLocaleTimeString();
+
+        threatChart.data.datasets[0].data = Object.values(state.threatCounts);
+        threatChart.update();
+        rateChart.data.labels.push(new Date().toLocaleTimeString());
+        
+        const isPrivateIP = /^(127\.|192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)/.test(src_ip);
+        if (type !== "Benign" && src_ip !== 'N/A' && !isPrivateIP) {
+            fetch(`https://ipapi.co/${src_ip}/json/`).then(res => res.json()).then(loc => {
+                if (loc && !loc.error) {
+                    const marker = L.marker([loc.latitude, loc.longitude], {icon: threatIcon}).addTo(map).bindPopup(`<b>${type}</b><br>${src_ip}`);
+                    setTimeout(() => map.removeLayer(marker), 45000);
+                }
+            });
+        }
+        
+        if (DOM.filterSelect.value === "All" || DOM.filterSelect.value === type) {
+            const logEntry = document.createElement('div');
+            logEntry.className = 'group log-entry flex items-center p-2 border-b border-gray-800 hover:bg-gray-700/50 transition-colors';
+            logEntry.setAttribute('data-threat-id', threatId);
+            logEntry.innerHTML = `
+                <span class="w-[15%]"><span class="inline-block text-center w-24 px-2 py-0.5 rounded text-xs text-white ${labelColors[type]}">${type}</span></span>
+                <span class="w-[15%] font-bold ${getSeverityColor(severity)}">${severity}</span>
+                <span class="w-[30%] text-gray-400">${src_ip} <span class="text-gray-500">→</span> ${dst_ip}</span>
+                <span class="w-[15%] text-right text-gray-500">${time}</span>
+                <span class="w-[25%] text-center actions-container">
+                    <div class="hidden group-hover:flex justify-center items-center gap-2">
+                        <button class="action-btn text-xs text-blue-400 hover:text-blue-300" data-action="inspect" title="Inspect Packet"><i class="fa-solid fa-magnifying-glass"></i></button>
+                        <button class="action-btn text-xs text-yellow-400 hover:text-yellow-300" data-action="investigate" title="Investigate IP"><i class="fa-solid fa-user-secret"></i></button>
+                        <button class="action-btn text-xs text-red-500 hover:text-red-400" data-action="block" title="Block IP"><i class="fa-solid fa-gavel"></i></button>
+                        <button class="action-btn text-xs text-green-500 hover:text-green-400" data-action="safe" title="Mark as Safe"><i class="fa-solid fa-check-circle"></i></button>
+                    </div>
+                </span>`;
+            DOM.logContainer.prepend(logEntry);
+            if(DOM.logContainer.children.length > 150) DOM.logContainer.removeChild(DOM.logContainer.lastChild);
+        }
+    };
+
+
+
+    
+    // --- PART 4: EVENT LISTENERS ---
+    socket.on("connect", () => {
+        DOM.statusBadge.textContent = 'Connected';
+        DOM.statusBadge.className = 'inline-block px-2 py-1 rounded text-xs bg-green-500 text-white';
+        socket.emit('request_initial_data');
+        updateMapTheme();
+        addHomeMarker();
+        updateInterface(DOM.interfaceSelect.value);
+    });
+    socket.on("disconnect", () => {
+        DOM.statusBadge.textContent = 'Disconnected';
+        DOM.statusBadge.className = 'inline-block px-2 py-1 rounded text-xs bg-red-600 text-white';
+        showAlert('SYSTEM DISCONNECTED! Check server status.', 'error', 0);
+        playSound('error');
+    });
+    socket.on("new_threat", processNewThreat);
+
+    socket.on("threat_update", (data) => {
+        if (data.threat_id && threatDataCache[data.threat_id]) {
+            const logEntry = DOM.logContainer.querySelector(`.log-entry[data-threat-id="${data.threat_id}"]`);
+            if (logEntry) {
+                const type = data.label || 'Others';
+                const severity = getSeverityInfo(type);
+                logEntry.querySelector('.w-[15%]').innerHTML = `<span class="inline-block text-center w-24 px-2 py-0.5 rounded text-xs text-white ${labelColors[type] || 'bg-gray-600'}">${type}</span>`;
+                logEntry.querySelector('.w-[15%]').className = `w-[15%] font-bold ${severity.color}`;
+                logEntry.querySelector('.w-[30%]').textContent = `${data.src_ip} → ${data.dst_ip}`;
+                logEntry.querySelector('.w-[15%]:last-child').textContent = new Date(data.timestamp).toLocaleTimeString();
+                logEntry.querySelector('.actions-container').innerHTML = `
+                    <div class="hidden group-hover:flex justify-center items-center gap-2">
+                        <button class="action-btn text-xs text-blue-400 hover:text-blue-300" data-action="inspect" title="Inspect Packet"><i class="fa-solid fa-magnifying-glass"></i></button>
+                        <button class="action-btn text-xs text-yellow-400 hover:text-yellow-300" data-action="investigate" title="Investigate IP"><i class="fa-solid fa-user-secret"></i></button>
+                        <button class="action-btn text-xs text-red-500 hover:text-red-400" data-action="block" title="Block IP"><i class="fa-solid fa-gavel"></i></button>
+                        <button class="action-btn text-xs text-green-500 hover:text-green-400" data-action="safe" title="Mark as Safe"><i class="fa-solid fa-check-circle"></i></button>
+                    </div>`;
+            }
+        }
+    });
+    socket.on("initial_data", (data) => {
+        DOM.interfaceSelect.innerHTML = data.interfaces.map(i => `<option value="${i}">${i}</option>`).join('');
+        DOM.interfaceSelect.value = data.current_interface;
+        DOM.currentInterface.textContent = data.current_interface;
+    });
+
+    DOM.sniffToggle.addEventListener("click", () => {
+        const action = state.sniffing ? 'pause_sniffing' : 'resume_sniffing';
+        socket.emit(action);
+        state.sniffing = !state.sniffing;
+        DOM.sniffingStatus.textContent = state.sniffing ? "Active" : "Paused";
+        DOM.sniffingStatus.className = `inline-block px-2 py-1 rounded text-xs ${state.sniffing ? 'bg-green-600' : 'bg-red-600'}`;
+        playSound(state.sniffing ? 'connect' : 'error');
+        DOM.sniffToggle.classList.toggle('bg-red-600', state.sniffing);
+        DOM.sniffToggle.classList.toggle('bg-green-600', !state.sniffing);
+        DOM.sniffToggle.innerHTML = `<i class="fa-solid ${state.sniffing ? 'fa-pause' : 'fa-play'} mr-2"></i>${state.sniffing ? 'Pause' : 'Resume'} Sniffing`;
+        DOM.sniffToggle.className = `w-40 px-3 py-1 rounded text-sm transition-colors ${state.sniffing ? 'bg-red-600 hover:bg-red-500' : 'bg-green-600 hover:bg-green-500'}`;
+    });
+
+    DOM.logContainer.addEventListener('click', (e) => {
+        const button = e.target.closest('.action-btn');
+        if (!button) return;
+        const logEntry = button.closest('.log-entry');
+        const threatId = logEntry.dataset.threatId;
+        const data = threatDataCache[threatId];
+        switch(button.dataset.action) {
+            case 'inspect': openPacketModal(threatId); break;
+            case 'investigate': alert(`Investigating ${data.src_ip}... (simulation)`); break;
+            case 'alert': alert(`Alerting ${data.src_ip}... (simulation)`); break;
+            case 'block': alert(`Blocking ${data.src_ip}... (simulation)`); break;
+            case 'unblock': alert(`Unblocking ${data.src_ip}... (simulation)`); break;
+            case 'whitelist': alert(`Whitelisting ${data.src_ip}... (simulation)`); break;
+            case 'blacklist': alert(`Blacklisting ${data.src_ip}... (simulation)`); break;
+            case 'safe': 
+                logEntry.classList.add('opacity-50', 'bg-green-900/30');
+                button.closest('.actions-container').innerHTML = `<span class="text-green-400 text-xs">Marked Safe</span>`;
+                break;
+        }
+    });
+
+    DOM.testThreatBtn.addEventListener('click', () => {
+        const threatTypes = ['DoS', 'PortScan', 'BruteForce', 'Phishing', 'Benign'];
+        const randomType = threatTypes[Math.floor(Math.random() * threatTypes.length)];
+        const randomIp = () => [0,0,0,0].map(()=>Math.floor(Math.random()*255)).join('.');
+        const testData = {
+            label: randomType,
+            src_ip: `185.${randomIp().split('.').slice(1).join('.')}`, // Make it look like a public IP
+            dst_ip: `192.168.1.${Math.floor(Math.random()*254)+1}`,
+            packet_info: { summary: 'TEST PACKET - Ether / IP / TCP', layers: 'Ethernet: ...\nIP: ...\nTCP: ...', hex_dump: '0000   00 11 22 33 44 55 66 77  88 99 aa bb cc dd ee ff   .".3DUfw......\n0010   ... test hex data ...' }
+        };
+        console.log("Injecting test threat:", testData);
+        processNewThreat(testData);
+    });
+    
+    DOM.modalCloseBtn.addEventListener('click', () => DOM.packetModal.classList.add('hidden'));
+    DOM.packetModal.addEventListener('click', (e) => { if (e.target === DOM.packetModal) DOM.packetModal.classList.add('hidden'); });
+    DOM.interfaceSelect.addEventListener("change", () => socket.emit('set_interface', { interface: DOM.interfaceSelect.value }));
+    DOM.filterSelect.addEventListener('change', () => DOM.logContainer.innerHTML = '');
+    DOM.toggleThemeBtn.addEventListener('click', () => {
+        document.documentElement.classList.toggle('dark');
+        updateMapTheme();
+    });
+    
+    setInterval(() => {
+        rateChart.data.labels.push(new Date().toLocaleTimeString().split(" ")[0]);
+        rateChart.data.datasets[0].data.push(state.threatsThisSecond);
+        if (rateChart.data.labels.length > 30) { rateChart.data.labels.shift(); rateChart.data.datasets[0].data.shift(); }
+        rateChart.update();
+        state.threatsThisSecond = 0;
+
+        const sortedAttackers = Object.entries(state.topAttackers).sort(([,a],[,b]) => b-a).slice(0,4);
+        DOM.topAttackersDiv.innerHTML = sortedAttackers.length ? sortedAttackers.map(([ip, count]) => `<div class="flex justify-between items-center"><span>${ip}</span><span class="text-red-400 font-bold">${count}</span></div>`).join('') : '<p class="text-gray-500">Awaiting data...</p>';
+    }, 5000);
+  </script>
+</body>
+</html>
+<!-- This HTML template is designed to provide a live dashboard for monitoring network threats detected by a packet sniffer. It uses Tailwind CSS for styling, Chart.js for visualizing threat data, and Socket.IO for real-time updates. The dashboard includes sections for system status, threat counts, confidence levels, and live logs of detected threats. -->
+<!-- The JavaScript code handles real-time updates from the server, dynamically updating charts and logs based
