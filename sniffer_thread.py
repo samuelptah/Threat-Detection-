@@ -59,3 +59,4 @@ class SnifferThread(threading.Thread):
 
     def is_stopped(self):
         return self.stop_event.is_set()
+    

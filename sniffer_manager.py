@@ -1,82 +1,70 @@
-# sniffer_manager.py
-
-import platform
-from scapy.all import get_if_list
-from sniffer_thread import SnifferThread
-
+import threading
+from scapy.all import get_if_list, conf
+import sniffer 
 
 class SnifferManager:
+    """Manages a single, active sniffer thread."""
+
     def __init__(self, socketio=None):
-        self.sniffers = {}  # {iface_name: SnifferThread}
         self.socketio = socketio
+        self.sniffer_thread = None
+        self.active_interface = None
+        self.available_interfaces = self._get_interfaces()
+        print(f"[INIT] SnifferManager initialized. Found interfaces: {self.available_interfaces}")
 
-    def start_all_sniffers(self):
-        """Start sniffing on all available interfaces."""
-        interfaces = get_if_list()
+    def _get_interfaces(self):
+        """Gets a list of human-readable network interface names."""
+        try:
+            # Use Scapy's conf object for more reliable interface info
+            return [iface.name for iface in conf.ifaces.values() if iface.ip and iface.mac]
+        except Exception as e:
+            print(f"[ERROR] Could not get interface list: {e}")
+            return ["default"]
 
-        for iface in interfaces:
-            if iface not in self.sniffers:
-                try:
-                    print(f"[INFO] Starting sniffer on interface: {iface}")
-                    sniffer = SnifferThread(iface=iface, socketio=self.socketio)
-                    sniffer.start()
-                    self.sniffers[iface] = sniffer
-                except Exception as e:
-                    print(f"[ERROR] Failed to start sniffer on {iface}: {e}")
+    def start_default_sniffer(self):
+        """Starts a sniffer on the first available valid interface."""
+        if self.available_interfaces:
+            default_iface = self.available_interfaces[0]
+            self.set_active_sniffer(default_iface)
+        else:
+            print("[ERROR] No suitable network interfaces found to start sniffing.")
 
-    def stop_all_sniffers(self):
-        """Stop all active sniffers."""
-        for iface, sniffer in self.sniffers.items():
-            try:
-                print(f"[INFO] Stopping sniffer on interface: {iface}")
-                sniffer.stop()
-            except Exception as e:
-                print(f"[ERROR] Failed to stop sniffer on {iface}: {e}")
-        self.sniffers.clear()
+    def set_active_sniffer(self, iface):
+        """Stops any current sniffer and starts a new one on the specified interface."""
+        if self.sniffer_thread and self.sniffer_thread.is_alive():
+            if self.active_interface == iface:
+                print(f"[WARN] Sniffer for interface {iface} is already running.")
+                return
+            
+            print(f"[MANAGER] Stopping sniffer on {self.active_interface} to switch.")
+            sniffer.stop_sniffing()
+            self.sniffer_thread.join(timeout=2) # Wait for the thread to finish
+
+        self.active_interface = iface
+        print(f"[MANAGER] Starting new sniffer on interface: {self.active_interface}")
+        
+        self.sniffer_thread = threading.Thread(
+            target=sniffer.start_sniffing,
+            args=(self.socketio, self.active_interface),
+            daemon=True
+        )
+        self.sniffer_thread.start()
+        print(f"[START] Sniffer started successfully on {self.active_interface}.")
 
     def get_status(self):
-        """Get status of all interfaces being sniffed."""
-        status = {}
-        for iface, sniffer in self.sniffers.items():
-            try:
-                status[iface] = {
-                    "is_sniffing": sniffer.is_sniffing(),
-                    "is_paused": sniffer.is_paused(),
-                    "is_stopped": sniffer.is_stopped(),
-                }
-            except Exception as e:
-                status[iface] = {"error": str(e)}
-        return status
-    def get_interfaces(self):
-        """Get a list of available network interfaces."""
-        try:
-            interfaces = get_if_list()
-            return interfaces
-        except Exception as e:
-            print(f"[ERROR] Failed to retrieve interfaces: {e}")
-            return []
-    def get_os_info(self):
-        """Get OS information."""
-        try:
-            os_info = {
-                "system": platform.system(),
-                "release": platform.release(),
-                "version": platform.version(),
-                "architecture": platform.architecture(),
-            }
-            return os_info
-        except Exception as e:
-            print(f"[ERROR] Failed to retrieve OS info: {e}")
-            return {}
-    def get_sniffer_info(self, iface):
-        """Get information about a specific sniffer."""
-        if iface in self.sniffers:
-            sniffer = self.sniffers[iface]
+        """Returns the status of the active sniffer."""
+        if self.sniffer_thread and self.sniffer_thread.is_alive():
             return {
-                "iface": iface,
-                "is_sniffing": sniffer.is_sniffing(),
-                "is_paused": sniffer.is_paused(),
-                "is_stopped": sniffer.is_stopped(),
+                "running": True, 
+                "interface": self.active_interface
             }
-        else:
-            return {"error": f"No sniffer found for interface {iface}"}
+        return {
+            "running": False,
+            "interface": None
+        }
+
+    def get_active_interface(self):
+        return self.active_interface
+
+    def get_available_interfaces(self):
+        return self.available_interfaces

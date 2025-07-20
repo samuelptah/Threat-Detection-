@@ -1,17 +1,30 @@
+import os
+import time
 from flask import Flask, render_template
 from flask_socketio import SocketIO
 from sniffer_manager import SnifferManager
-from system_info import get_system_info, log_system_info
-from sniffer import recent_threats
- 
+from system_info import get_system_info
+import sniffer
 
 # --- Flask App Setup ---
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key'
+app = Flask(__name__, template_folder='templates', static_folder='static')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'a-strong-default-secret-key')
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 # --- Initialize Sniffer Manager ---
 sniffer_manager = SnifferManager(socketio=socketio)
+
+# --- Periodic System Info Emitter ---
+def update_stats_periodically():
+    while True:
+        try:
+            stats = sniffer.get_stats()
+            sysinfo = get_system_info()
+            combined = {**sysinfo, **stats}
+            socketio.emit('system_info', combined)
+        except Exception as e:
+            print(f"[ERROR] update_stats_periodically: {e}")
+        time.sleep(3)
 
 # --- Routes ---
 @app.route('/')
@@ -20,52 +33,45 @@ def index():
 
 # --- Socket.IO Events ---
 @socketio.on('connect')
-def on_connect():
+def handle_connect():
     print("[SOCKET] Client connected.")
 
-    # Emit past buffered threats (last 20 for brevity)
-    for threat in list(recent_threats)[-20:]:
-        socketio.emit('new_threat', threat)
-
-    # Start sniffers in background
-    socketio.start_background_task(target=sniffer_manager.start_all_sniffers)
-
-    # Emit system info
-    info = get_system_info()
-    socketio.emit('system_info', info)
-    log_system_info(info)
-
 @socketio.on('disconnect')
-def on_disconnect():
+def handle_disconnect():
     print("[SOCKET] Client disconnected.")
 
-@socketio.on('get_sniffer_status')
-def send_status():
-    status = sniffer_manager.get_status()
-    socketio.emit('sniffer_status', status)
+@socketio.on('request_initial_data')
+def handle_initial_data_request():
+    print("[SOCKET] Client requested initial data.")
+    interfaces = sniffer_manager.get_available_interfaces()
+    current_iface = sniffer_manager.get_active_interface()
 
-@socketio.on('select_interface')
-def switch_interface(data):
-    iface = data.get('iface')
+    socketio.emit('initial_data', {
+        'interfaces': interfaces,
+        'current_interface': current_iface
+    })
+    socketio.emit('sniffer_status', sniffer_manager.get_status())
+    socketio.emit('system_info', {**get_system_info(), **sniffer.get_stats()})
+
+@socketio.on('set_interface')
+def handle_set_interface(data):
+    iface = data.get('interface')
     if iface:
-        result = sniffer_manager.restart_sniffer_on_interface(iface)
-        socketio.emit('sniffer_status', result)
+        print(f"[MANAGER] Switching sniffer to: {iface}")
+        sniffer_manager.set_active_sniffer(iface)
+        socketio.emit('sniffer_status', sniffer_manager.get_status())
     else:
-        socketio.emit('sniffer_status', {"error": "No interface specified"})
+        socketio.emit('sniffer_status', {"error": "No interface provided"})
 
-@socketio.on('start_sniffers')
-def start_all():
-    sniffer_manager.start_all_sniffers()
-    socketio.emit('sniffer_status', {'status': 'started'})
-
-@socketio.on('stop_sniffers')
-def stop_all():
-    sniffer_manager.stop_all_sniffers()
-    socketio.emit('sniffer_status', {'status': 'stopped'})
-
-# --- Main ---
+# --- App Entry ---
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+    print("[INIT] Launching AI Threat Intelligence Dashboard...")
+
+    # Start background sniffing and stats reporting
+    socketio.start_background_task(sniffer_manager.start_default_sniffer)
+    socketio.start_background_task(update_stats_periodically)
+
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
 
 
 
