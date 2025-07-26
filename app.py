@@ -67,11 +67,8 @@ def handle_set_interface(data):
 if __name__ == '__main__':
     print("[INIT] Launching AI Threat Intelligence Dashboard...")
 
-    # Start background sniffing and stats reporting
-    socketio.start_background_task(sniffer_manager.start_default_sniffer)
-    socketio.start_background_task(update_stats_periodically)
+   
 
     socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
-
-
+    
 
